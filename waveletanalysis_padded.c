@@ -5,7 +5,9 @@
 #include <complex.h>
 #include <time.h>
 
-
+/*
+ * Parameters which should be used for the wavelet
+ */
 typedef struct Parameter_t{
     double freq_min;
     double freq_max;
@@ -18,6 +20,9 @@ typedef struct Parameter_t{
     double b, k, omega_0;
 } Parameter_t;
 
+/*
+ * Regarding the data itself
+ */
 typedef struct Data_t{
     double dt_data;
     int numLines;
@@ -64,10 +69,23 @@ int main(int argc, char* argv[]){
 	    NULL	// *productArray
 	};
 
+	// Create artificial data (here a linear chirp function / a sin with constant frequency)
 	createDummyData(data.dt_data);
+
+
+	// Get length of file/data
 	getNumberOfLines("data_input/hellothere.dat", &data);
+	
+
+	// Allocate memory for arrays in data-structure
 	allocate_memory_for_data(&data);
 
+
+	// Read data from file into data-array
+	readDataFromFile("data_input/hellothere.dat", &data, data.dataArray);
+
+
+	// Perform wavelet calculation depending on the mode set (frequency and/or time domain)
 #ifdef TD
 	analyzeWaveletTD(&parameters, &data);
 #endif
@@ -77,29 +95,18 @@ int main(int argc, char* argv[]){
 	freeData(&data);
 }
 
-void allocate_memory_for_data(Data_t* data){
-	double *dataArray = malloc(data->numLines_padded * sizeof(double));
-	if(dataArray == NULL){
-		printf("Could not allocate memory for data array!\n");
+void createDummyData(double dt_data){
+	double t;
+	FILE *fp = fopen("data_input/hellothere.dat", "w");
+	for(t=0.0; t<20.0; t+=dt_data){
+	    if(t<10.0)
+		fprintf(fp, "%.2f\n", sin(2*M_PI*(0.5*t*t + 1.0*t)));
+	    else
+		//fprintf(fp, "%.2f\n", sin(2*M_PI*(0.5*t*t + 1.0*t)));
+		fprintf(fp, "%.2f\n", sin(2*M_PI*(5.0*t)));
+
 	}
-	readDataFromFile("data_input/hellothere.dat", data, dataArray);
-
-
-	double complex *waveletArray = malloc(data->numLines_padded * sizeof(double complex));
-	if(waveletArray == NULL){
-		printf("Could not allocate memory for wavelet array!\n");
-	}
-
-
-	double complex *productArray = malloc(data->numLines_padded * sizeof(double complex));
-	if(productArray == NULL){
-		printf("Could not allocate memory for product array!\n");
-	}
-
-
-	data->dataArray = dataArray;
-	data->waveletArray = waveletArray;
-	data->productArray = productArray;
+	fclose(fp);
 }
 
 int getNumberOfLines(const char* filename, Data_t* data){
@@ -130,7 +137,6 @@ int getNumberOfLines(const char* filename, Data_t* data){
 
 	return 0;
 }
-
 
 int readDataFromFile(const char* filename, Data_t* data, double *targetArray){
 	FILE *fp = fopen(filename, "r");
@@ -166,6 +172,31 @@ int readDataFromFile(const char* filename, Data_t* data, double *targetArray){
 	return EXIT_SUCCESS;
 }
 
+void allocate_memory_for_data(Data_t* data){
+	double *dataArray = malloc(data->numLines_padded * sizeof(double));
+	if(dataArray == NULL){
+		printf("Could not allocate memory for data array!\n");
+	}
+
+
+	double complex *waveletArray = malloc(data->numLines_padded * sizeof(double complex));
+	if(waveletArray == NULL){
+		printf("Could not allocate memory for wavelet array!\n");
+	}
+
+
+	double complex *productArray = malloc(data->numLines_padded * sizeof(double complex));
+	if(productArray == NULL){
+		printf("Could not allocate memory for product array!\n");
+	}
+
+
+	data->dataArray = dataArray;
+	data->waveletArray = waveletArray;
+	data->productArray = productArray;
+}
+
+
 void createMorletWavelet(double complex* array, int numElements, double dt_morlet, double k, double omega0, double a, double b){
 	// psi = k_0 * cos(wt) * exp(-t²/2)
 	// psi = k * exp(i*w_0*t) * exp(-t²/2)	
@@ -181,6 +212,13 @@ void createMorletWavelet(double complex* array, int numElements, double dt_morle
 		}
 	}
 }
+
+/*
+ *
+ * ===========================================================================================================
+ * 					TIME-DOMAIN
+ * ===========================================================================================================
+ */
 
 double complex calculateConvolutionValue(double* dataArray, double complex* waveletArray, double complex* productArray, int numLines, double h){
 	int i;
@@ -236,11 +274,19 @@ void analyzeWaveletTD(Parameter_t* parameters, Data_t* data){
 	
 }
 
+/*
+ *
+ * ===========================================================================================================
+ * 					FREQUENCY-DOMAIN
+ * ===========================================================================================================
+ */
+
 void analyzeWaveletFD(Parameter_t* parameters, Data_t* data){
 	// *** FREQUENCY DOMAIN ***
 	clock_t start_FD = clock();
 	int numLines = data->numLines_padded;
 
+	// Prepare Fourier-transformation
 	fftw_complex *data_in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * numLines);
 	fftw_complex *data_out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * numLines);
 	fftw_plan plan_data = fftw_plan_dft_1d(numLines, data_in, data_out, FFTW_FORWARD, FFTW_MEASURE);
@@ -253,11 +299,13 @@ void analyzeWaveletFD(Parameter_t* parameters, Data_t* data){
         fftw_complex *result_out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * numLines);
         fftw_plan plan_result = fftw_plan_dft_1d(numLines, result_in, result_out, FFTW_BACKWARD, FFTW_MEASURE);
 
+	// Copy data into real-part of data_in array and set complex part equal to 0.0
 	int i;
 	for(i=0; i<numLines; i++){
 		data_in[i][0] = data->dataArray[i];
 		data_in[i][1] = 0.0;
 	}
+	// Fourier-transformation
 	fftw_execute(plan_data);
 
 	int shifted_index;
@@ -268,10 +316,16 @@ void analyzeWaveletFD(Parameter_t* parameters, Data_t* data){
 	parameters->k = 1.0;
 	for(freq=parameters->freq_min; freq <= parameters->freq_max; freq += parameters->delta_freq){
 		parameters->b = parameters->omega_0/(2.0*M_PI*freq);
+
+		// set k = 1/sqrt(b) for energy conservation
 		parameters->k = 1.0 / sqrt(parameters->b);
+
 		createMorletWavelet(data->waveletArray, numLines, data->dt_data, parameters->k, parameters->omega_0, data->numLines/2.0 * data->dt_data, parameters->b);
 		
-		// slice the wavelet in half so that it is periodically centered around 0
+		/*
+		 * Here the wavelet needs to be sliced in half/shifted so that its origin is periodically 
+		 * centered around 0 to avoid anomalies at the center of the wavelet.
+		 */
 		for(i=0; i<numLines; i++){
 			shifted_index = (i + numLines/2) % numLines;
 			psi_in[i][0] = creal(data->waveletArray[shifted_index]);
@@ -279,8 +333,10 @@ void analyzeWaveletFD(Parameter_t* parameters, Data_t* data){
 			//psi_in[i][0] = creal(waveletArray[i]);
 			//psi_in[i][1] = cimag(waveletArray[i]);
 		}	
+		// Fourier-transformation of the wavelet
 		fftw_execute(plan_psi);
 		
+		// Calculate convolution via the product in frequency-space
 		for(i=0; i<numLines; i++){
 			A = data_out[i][0];
 			B = data_out[i][1];
@@ -290,8 +346,10 @@ void analyzeWaveletFD(Parameter_t* parameters, Data_t* data){
 			result_in[i][0] = A*C - B*D;
 			result_in[i][1] = A*D + B*C;
 		}
+		// Fourier-transformation of the results
 		fftw_execute(plan_result);
 
+		// Write results to file but taking zero-padding into account
 		for(i=data->padding; i<data->numLines+data->padding; i++){
 			//time = (i - numLines / 2) * data->dt_data;
 			time = (i - data->padding) * (data->dt_data);
@@ -316,19 +374,6 @@ void analyzeWaveletFD(Parameter_t* parameters, Data_t* data){
 	fftw_free(result_out);
 }
 
-void createDummyData(double dt_data){
-	double t;
-	FILE *fp = fopen("data_input/hellothere.dat", "w");
-	for(t=0.0; t<20.0; t+=dt_data){
-	    if(t<10.0)
-		fprintf(fp, "%.2f\n", sin(2*M_PI*(0.5*t*t + 1.0*t)));
-	    else
-		//fprintf(fp, "%.2f\n", sin(2*M_PI*(0.5*t*t + 1.0*t)));
-		fprintf(fp, "%.2f\n", sin(2*M_PI*(5.0*t)));
-
-	}
-	fclose(fp);
-}
 
 
 void freeData(Data_t* data){
