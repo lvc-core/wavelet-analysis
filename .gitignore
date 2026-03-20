@@ -1,4 +1,14 @@
+data_input/*
 data_results/*
-output
+#ignore all files but allow file with suffix
+*
+!*.*
+
+*.xyz
+*.dat
+*.txt
+
+*.supp
+
 *.swp
 *.swo

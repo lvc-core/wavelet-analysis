@@ -1,27 +1,28 @@
 # compiler and flags
 CC = gcc
-CFLAGS = -Wall -lfftw3 -lm -g -O0 -DFD
+CFLAGS = -Wall -lfftw3 -lm -g -O0
 
 # name of output
 TARGET = output
 
+# name of the .xyz file
+FILENAME = "hellothere.xyz"
 # stadard parameter for omega
-OMEGA ?= 15
-MODE ?= FD
+OMEGA ?= 6.0
 
 # source
-SRC = waveletanalysis_padded.c
+SRC = waveletanalysis_overlap_save.c
 
 # default target
 all: build run
 
 # compile
 build:
-	$(CC)  $(SRC) -o $(TARGET) $(CFLAGS) $(addprefix -D, $(MODE))
+	$(CC)  $(SRC) -o $(TARGET) $(CFLAGS)
 
 # run
 run:
-	./$(TARGET) $(OMEGA)
+	./$(TARGET) $(FILENAME) $(OMEGA)
 
 # cleanup
 clean:
