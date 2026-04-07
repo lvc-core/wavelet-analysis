@@ -32,8 +32,7 @@ typedef struct DataParameters_s{
 
     int chunkSize;	// N
     int L;
-    int numberOfChunks;
-    int chunkRemainder;
+    int numberOfBlocks;
 } DataParameters_s;
 
 typedef struct ArrayContainer{
@@ -64,7 +63,7 @@ void setChunkSize();
 void changeFileFormat(char* filename);
 void copyChunkFromFileToArray(int atom, int chunk, const char* filename, double *targetArray);
 void createMorletWavelet(int M);
-void WaveletAnalysisFD(int currentChunk, float currentFrequency, FILE* fp);
+void WaveletAnalysisFD(int currentBlock, float currentFrequency, FILE* fp);
 void prepareData(int chunkSize);
 void prepareWavelet(int chunkSize);
 void prepareFFT(FFT_wrapper* data, FFT_wrapper* wavelet, FFT_wrapper* result, int chunkSize);
@@ -97,35 +96,37 @@ int main(int argc, char* argv[]){
     prepareFFT(&data, &wavelet, &result, dp.chunkSize);
 
 
-    int atom, chunk;
+    int atom, block;
     float freq;
     for(atom=0; atom<dp.numAtoms; atom++){
 	clock_t start_FD = clock();
-	printf("L: %d\n", dp.L);
 
 	FILE *results_FD = fopen("data_results/results_FD.dat", "w");
 
 	for(freq=wp.freq_min; freq <= wp.freq_max; freq += wp.delta_freq){
-	    for(chunk=0; chunk<1; chunk++){
-	    copyChunkFromFileToArray(atom, chunk, write_filename_binary, ac.dataArray);
-	    prepareData(dp.chunkSize);
+	    wp.scale = wp.omega_0 / (2.0*M_PI*freq*dp.dt_data);
+	    /*
+	     * here we assume that the wavelet is relevant at +-4sigma
+	     * further more we add 1 so that the wavelet is constructed with an uneven number of sampling points
+	     */
+	    wp.M = 8 * (int)(wp.scale+1) + 1;	
+	    //wp.M = 385;
+	    //printf("M: %d\n", wp.M);
 
-		wp.scale = wp.omega_0/(2.0*M_PI*freq*dp.dt_data);
-		/*
-		 * here we assume that the wavelet is relevant at +-4sigma
-		 * further more we add 1 so that the wavelet is constructed with an uneven number of sampling points
-		 */
-		wp.M = 8 * (int)(wp.scale+1) + 1;	
-		//printf("M: %d\n", wp.M);
+	    /*
+	     * here the actual number of useable data is calculated
+	     */
+	    dp.L = dp.chunkSize - (wp.M - 1);
+	    //dp.L = 1;
+	    int numberOfBlocks = (dp.numTimesteps + dp.L - 1) / dp.L;
 
-		/*
-		 * here the actual number of useable data is calculated
-		 */
-		dp.L = dp.chunkSize - wp.M + 1;
+	    for(block=0; block<numberOfBlocks; block++){
+		copyChunkFromFileToArray(atom, block, write_filename_binary, ac.dataArray); // MODIFY
+		prepareData(dp.chunkSize); // OK
 
-		createMorletWavelet(wp.M);
-		prepareWavelet(dp.chunkSize);
-		WaveletAnalysisFD(chunk, freq, results_FD);
+		createMorletWavelet(wp.M); // OK
+		prepareWavelet(dp.chunkSize); // OK
+		WaveletAnalysisFD(block, freq, results_FD); // MODIFY
 	    }
 
 	}
@@ -164,11 +165,12 @@ void initDataParameters(){
 
     dp.L = -1;
     dp.chunkSize = -1;
-    dp.numberOfChunks = -1;
+    dp.numberOfBlocks = -1;
 }
 
 
 void getNumberOfTimestepsBinary(const char* filename){
+    // TODO: only valid for one atom?
     FILE* fp = fopen(filename, "rb"); 
 
     fseek(fp, 0, SEEK_END);
@@ -360,7 +362,7 @@ void initArrayContainer(){
 // cuts trajectory of ONE atom into chunks
 void setChunkSize(){
     /*
-     * N (chunksize) = L + M - 1 such that n is power of 2 if possible
+     * N (chunksize) = L + (M - 1) such that N is power of 2 if possible
      *
      * L is the desired block size and N is the whole chunk, so additionally including M-1 elements from the previous block.
      * Here L is chosen in such a way that N is a power of 2 so that the FFT can use a more efficient algorithm.
@@ -417,40 +419,74 @@ void setChunkSize(){
 	}
     }
     dp.chunkSize = N;
-    dp.L = L;
-    dp.numberOfChunks = (dp.numTimesteps + N - 1) / N;
 
     printf("N: %ld\n", N);
     printf("L: %ld\n", L);
     printf("M_max: %ld\n", M_max);
-    printf("numChunks: %d\n", dp.numberOfChunks);
 }
 
 
-void copyChunkFromFileToArray(int atom, int chunk, const char* filename, double *targetArray){
+void copyChunkFromFileToArray(int atom, int block, const char* filename, double *targetArray){
     /*
-     * Switching to a binary representation is more convenient since the file pointer position  
-     * (for the beginning of each chunk) is easier to set. 
+     * here the block itself and the M-1 preceding elements (which together make up a chunk) will be copied into the array
      *
-     * In a textfile you would need to somehow count the bytes of each individual line, which are not the same for all lines
+     * There are a few cases which have to be taken care of:
+     * 1) the first block should be copied (so there are no M-1 previous elements)
+     * 		--> zeros are added
+     * 		same for any block so that blockPos - (M-1) < 0
+     * 2) the number of timesteps is not divisible by L (so the last block does not have length L)
+     * 		 --> zeros are added such that the last block is of length L
      */
 
+    // TODO: File descriptor is opened each time the function is called. Only open it once per atom.
     FILE *fp = fopen(filename, "rb");
-    long chunkPosition = atom * dp.numTimesteps * sizeof(double) + chunk * dp.chunkSize * sizeof(double);
+    long atomStart = atom * dp.numTimesteps;
+    long atomEnd = (atom+1) * dp.numTimesteps;
+    
+    long blockStart = atomStart + block * dp.L; 
+    long chunkStart = blockStart - (wp.M - 1);
+    long chunkEnd = chunkStart + dp.chunkSize;
+    
+    memset(targetArray, 0, dp.chunkSize * sizeof(double));
 
-    fseek(fp, chunkPosition, SEEK_SET);
-    fread(targetArray, sizeof(double), dp.chunkSize, fp);
+    long readStart = chunkStart;
+    long readEnd = chunkEnd;
+
+    if(readStart < atomStart){
+	readStart = atomStart;
+    }
+
+    if(readEnd > atomEnd){
+	readEnd = atomEnd;
+    }
+
+    long elementsToRead = readEnd - readStart;
+
+    if(elementsToRead > 0){
+	long shift = readStart - chunkStart;
+
+	fseek(fp, readStart * sizeof(double), SEEK_SET);
+
+	fread(targetArray + shift, sizeof(double), elementsToRead, fp);
+
+	/*
+	for(int i=0; i<dp.chunkSize; i++){
+	    printf("%lf ", targetArray[i]);
+	}
+	printf("\n");
+	printf("\n");
+	*/
+    }
 
     fclose(fp);
 }
 
-/*
- *
- * M should be an uneven number so the wavelet can be centered around 0
- * create a wavelet with M datapoints which are centered around 0 (therefore wrapped) and fill the remaining N-M slots with 0's (N is the chunksize here)
- *
- */
 void createMorletWavelet(int M){
+    /*
+     * M should be an uneven number so the wavelet can be centered around 0
+     * This function creates a wavelet with M datapoints which are centered around 0 (therefore wrapped) 
+     */
+
     // psi_mother = 1/(pi^0.25 * sqrt(d)) * exp(-t^2/(2*d^2)) * exp(i*w_0*t)
     // psi = 1/sqrt(s) * psi_mother( (t-t0) / s)
     // psi = 1/(pi^0.25 * sqrt(s) * sqrt(d)) * exp(-(t-t_0)^2/(2*s^2*d^2)) * exp(i*w_0*t)
@@ -459,35 +495,54 @@ void createMorletWavelet(int M){
 	printf("wavelet has been created with an even number of sampling points!\n");
     }
 
+    memset(ac.waveletArray, 0, dp.chunkSize * sizeof(double complex));
+
+    FILE* fp = fopen("wavelet_test.dat", "w");
+    int half = wp.M / 2 + 1;
+
+for(int n = -half; n <= half; n++) {
+
+    double tau = n * dp.dt_data / wp.scale;
+
+    double complex psi =
+        1.0 / (pow(M_PI, 0.25) * sqrt(wp.scale * wp.d))
+        * exp(-tau*tau/(2.0*wp.d*wp.d))
+        * cexp(I * wp.omega_0 * tau);
+
+    int idx;
+    if(n >= 0)
+        idx = n;
+    else
+        idx = dp.chunkSize + n;   // negative times at the end of the array
+
+    ac.waveletArray[idx] = psi;
+}
+/*
     int i;
     double tau;
-    double a = M/2.0 * dp.dt_data;
+    double a = M/2.0;
 
     FILE* fp = fopen("wavelet_test.dat", "w");
 
-    //wp.scale = wp.omega_0/(2.0*M_PI*100e-3*dp.dt_data); // divide by dt???
-    //printf("scale: %f\n", wp.scale);
     for(i=0; i<M; i++){
-	/*
-	 * 
-	 * wraps the data around 0. (M+1)/2 on the left and (M-1)/2 on the right.
-	 * this is done to eliminate artifacts in the fft plot later on.
-	 *
-	 */
+	 // wraps the data around 0. (M+1)/2 on the left and (M-1)/2 on the right.
+	 // this is done to eliminate artifacts in the fft plot later on.
+    
 	int shifted = (i + M/2 + 1) % M;
-	//shifted = i;
+	//int shifted = i;
 	//printf("i: %d --> shifted index: %d\n", i, shifted);
+	a = 0;
 
-	tau = (shifted*dp.dt_data - a)/wp.scale;
-	if (fabs(tau) > 6.0e12){
-	    ac.waveletArray[shifted] = 0.0;
-	    fprintf(fp, "%f\n", 0.0);
-	    printf("value exceeds bounds!");
-	}else{
-	    ac.waveletArray[shifted] = 1.0 / (pow(M_PI, 1.0/4.0) * sqrt(wp.scale * wp.d)) * exp(-pow(tau, 2) / (2.0*pow(wp.d, 2.0))) * cexp(I * wp.omega_0 * tau);
-	    fprintf(fp, "%f\n", creal(ac.waveletArray[shifted]));
-	}
+	tau = (shifted - a) * dp.dt_data / wp.scale;
+
+	ac.waveletArray[shifted] = 1.0 / (pow(M_PI, 1.0/4.0) 
+				    * sqrt(wp.scale * wp.d)) 
+	     			    * exp(-pow(tau, 2) / (2.0*pow(wp.d, 2.0))) 
+				    * cexp(I * wp.omega_0 * tau);
+	
+	fprintf(fp, "%f\n", creal(ac.waveletArray[shifted]));
     }
+    */
     fclose(fp);
 }
 
@@ -534,13 +589,13 @@ void prepareWavelet(int chunkSize){
      */
     int i;
     memset(wavelet.in, 0, chunkSize * sizeof(double complex));
-    for(i=0; i<chunkSize; i++){
+    for(i=0; i<wp.M; i++){
 	wavelet.in[i][0] = creal(ac.waveletArray[i]);
 	wavelet.in[i][1] = cimag(ac.waveletArray[i]);
     }	
 }
 
-void WaveletAnalysisFD(int currentChunk, float currentFrequency, FILE* fp){
+void WaveletAnalysisFD(int currentBlock, float currentFrequency, FILE* fp){
 
     int numAtoms = dp.numAtoms;
     int chunkSize = dp.chunkSize;
@@ -570,14 +625,27 @@ void WaveletAnalysisFD(int currentChunk, float currentFrequency, FILE* fp){
      * Write results to file
      */
     double time, value;
-    for(i=0; i<chunkSize; i++){
-	time = currentChunk * chunkSize * dp.dt_data + i * dp.dt_data;
-	value = sqrt(result.out[i][0]*result.out[i][0] + result.out[i][1]*result.out[i][1]) / numAtoms;
+    int offset = 0;
+    //for(i=chunkSize-dp.L; i<chunkSize; i++){
+    for(i=wp.M-1; i<wp.M-1+dp.L; i++){
+    //for(i=chunkSize-dp.L-chunkSize/2.0; i<chunkSize-chunkSize/2.0; i++){
+	time = (currentBlock * dp.L + offset) * dp.dt_data; 
+
+	/*
+	 * TODO: should not be neccessary
+	 * discard values which are greater than the chunkSize (last block is padded with zeros) so gnuplot gets an even grid to plot
+	 */
+	//if(time > chunkSize-1){
+	if(currentBlock *dp.L + offset >= dp.numTimesteps){
+	    break;
+	}
+
+	value = sqrt(result.out[i][0]*result.out[i][0] + result.out[i][1]*result.out[i][1]) / numAtoms; // TODO: why dividing by numatoms?
 
 	fprintf(fp, "%.4e %.4e %.4e\n", time, currentFrequency, value);
+	offset++;
     }
     fprintf(fp, "\n");
-
 }
 
 
@@ -601,17 +669,18 @@ void createArtificialDataset(double dt_data){
     FILE *fp = fopen("hellothere.xyz", "w");
     for(t=0.0; t<400.0; t+=dt_data){
 	//printf("t: %f\n", t);
-	if(t>=0.0){
+	if(t<=200.0){
 	    fprintf(fp, "1\n");
 	    fprintf(fp, "# ORCA AIMD Position Step 0, t=%.2f fs, E_Pot=-4816.70201257 Hartree, Unit is Angstrom\n", t);
 	    double value = sin(2*M_PI*(0.000117*t*t + 0.02*t));
+	    //double value = sin(2*M_PI*(0.05*t));
 	    double value2 = pow(3, -(1.0/2.0)) * value;
 	    fprintf(fp, "S %.2f %.2f %.2f\n", value, value, value);
 	}else{
 	    fprintf(fp, "1\n");
 	    fprintf(fp, "# ORCA AIMD Position Step 0, t=%.2f fs, E_Pot=-4816.70201257 Hartree, Unit is Angstrom\n", t);
 	    //fprintf(fp, "%.2f\n", sin(2*M_PI*(0.5*t*t + 1.0*t)));
-	    double value3 = sin(2*M_PI*(5.0*t));
+	    double value3 = sin(2*M_PI*(0.05*t));
 	    double value4 = pow(3, -(1.0/2.0)) * value3;
 	    fprintf(fp, "S %.2f %.2f %.2f\n", value4, value4, value4);
 	}
