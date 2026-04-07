@@ -1,7 +1,7 @@
 # wavelet-analysis
 
 usage:
-make OMEGA=15 MODE='TD FD'
+make
 
-plotting:
-plot 'results_XY.dat' using 1:2:3 with image
+plotting (gnuplot):
+plot 'data/results_FD.dat' using 1:($2*1000):3 with image
