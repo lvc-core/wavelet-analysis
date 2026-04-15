@@ -13,3 +13,6 @@ data_results/*
 
 *.swp
 *.swo
+
+waveletanalysis.c
+waveletanalysis_padded.c
