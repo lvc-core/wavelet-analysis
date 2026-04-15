@@ -15,6 +15,12 @@
  */
 // %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+/*
+ * here we assume that the wavelet is relevant at +-4sigma
+ * further more we add 1 so that the wavelet is constructed with an uneven number of sampling points
+ */
+#define SIGMA 4.0
+
 typedef struct WaveletParameter_s{
     int M;
 
@@ -75,6 +81,9 @@ static ArrayContainer ac;
 
 FFT_wrapper data, wavelet, result;
 
+/*
+ * Here not all files will be needed. A few are just for debugging
+ */
 char* read_filename;
 char* write_filename;
 char* write_filename_binary = "abs_trajectory_bin";
@@ -105,28 +114,24 @@ int main(int argc, char* argv[]){
 
 	for(freq=wp.freq_min; freq <= wp.freq_max; freq += wp.delta_freq){
 	    wp.scale = wp.omega_0 / (2.0*M_PI*freq*dp.dt_data);
-	    /*
-	     * here we assume that the wavelet is relevant at +-4sigma
-	     * further more we add 1 so that the wavelet is constructed with an uneven number of sampling points
-	     */
-	    wp.M = 8 * (int)(wp.scale+1) + 1;	
-	    //wp.M = 385;
+
+	    wp.M = 2.0 * SIGMA * (int)(wp.scale+1) + 1;	
 	    //printf("M: %d\n", wp.M);
 
 	    /*
 	     * here the actual number of useable data is calculated
 	     */
 	    dp.L = dp.chunkSize - (wp.M - 1);
-	    //dp.L = 1;
+
 	    int numberOfBlocks = (dp.numTimesteps + dp.L - 1) / dp.L;
 
 	    for(block=0; block<numberOfBlocks; block++){
-		copyChunkFromFileToArray(atom, block, write_filename_binary, ac.dataArray); // MODIFY
-		prepareData(dp.chunkSize); // OK
+		copyChunkFromFileToArray(atom, block, write_filename_binary, ac.dataArray);
+		prepareData(dp.chunkSize);
 
-		createMorletWavelet(wp.M); // OK
-		prepareWavelet(dp.chunkSize); // OK
-		WaveletAnalysisFD(block, freq, results_FD); // MODIFY
+		createMorletWavelet(wp.M);
+		prepareWavelet(dp.chunkSize);
+		WaveletAnalysisFD(block, freq, results_FD);
 	    }
 
 	}
@@ -137,6 +142,8 @@ int main(int argc, char* argv[]){
 
     freeData();
 }
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 void setFilenames(char* filename){ 
     read_filename = filename;
@@ -205,6 +212,9 @@ int getNumberOfAtoms(const char* filename){
     return numberOfAtoms;
 };
 
+/**
+ * This function reads dt from the file
+ */
 int getDeltaTime(const char* filename){
     FILE* fp = fopen(filename, "r");
     if (fp == NULL){ 
@@ -240,6 +250,11 @@ int getDeltaTime(const char* filename){
     return t2 - t1;
 }
 
+/**
+ * The initial velocities are given in vel.x vel.y vel.z.
+ * This function creates a new file which contains the absolute velocity of each atom at each timestep. 
+ * So three columns are reduced to one column.
+ */
 void calcAbsVelocity(char* filename){
 
     FILE* fp1 = fopen(filename, "r");
@@ -304,6 +319,15 @@ void calcAbsVelocity(char* filename){
  * Until now the only the .xyz file-type-specific lines have been read and removed. At this point each block
  * represents all atoms at time t. 
  * Now this should be changed so that one block contains the trajectory of a certain atom for all times.
+ *
+ * 		------------    	------------
+ * 		|atom1	t1 |		|atom1	t1 |
+ * 		|atom2	t1 |	--->	|atom1	t2 |
+ * 		|atom3	t1 |		|atom1	t3 |
+ * 		|atom4	t1 |		|atom1	t4 |
+ * 		------------		-----------
+ *
+ * This makes the readin later on a bit easier.
  */
 void changeFileFormat(char* filename){
     FILE* in = fopen(filename, "rb");
@@ -315,34 +339,34 @@ void changeFileFormat(char* filename){
 
 	    fread(&value, sizeof(double), 1, in);
 	    long offset = (atom * dp.numTimesteps + timestep) * sizeof(double); 
-	    //if(timestep == 0){ 
-	    //	printf("atom: %d, value: %f, offset: %ld\n", atom, value, offset/sizeof(double));
-	    //}
 	    fseek(out, offset, SEEK_SET);
 	    fwrite(&value, sizeof(double), 1, out);
 	}
     }
 
     fclose(out);
+
+
+    /*
+     * For testing
+     *
+     
     out = fopen("abs_trajectory_bin_formatted", "rb");
     FILE* new = fopen("test_file.dat", "w");
     rewind(out);
     for(int i=0; i<401; i++){
 	fread(&value, sizeof(double), 1, out);
 	fprintf(new, "%f\n", value);
-	//printf("first number of formatted binary file: %f\n", value);
-	//fseek(out, sizeof(double), SEEK_SET);
     }
     fclose(new);
+    fclose(out);
+    */
 
     fclose(in);
-    fclose(out);
 }
 
 /*
- *
- * 		HERE THE ALLOCATED MEMORY IS NEEDED FOR N = L+M-1 INSTEAD OF JUST L
- *
+ * Allocate memory for the signal and the wavelet. 		
  */
 void initArrayContainer(){
     ac.dataArray = malloc(dp.chunkSize * sizeof(double));
@@ -359,7 +383,6 @@ void initArrayContainer(){
     memset(ac.waveletArray, 0, dp.chunkSize * sizeof(double complex));
 }
 
-// cuts trajectory of ONE atom into chunks
 void setChunkSize(){
     /*
      * N (chunksize) = L + (M - 1) such that N is power of 2 if possible
@@ -385,6 +408,9 @@ void setChunkSize(){
     int i;
     long N=0, L=0;
     for(i=0; ; i++){
+	/*
+	 * Trying to find a suitable chunksize as a power of 2
+	 */
 	if(M_max > pow(2, i)){;	
 	    continue;
 	}else{
@@ -398,6 +424,9 @@ void setChunkSize(){
 		printf("Setting chunk size to: %ld with a block length of L = %ld\n", N, L);
 	    }
 
+	    /*
+	     * Choosing L as the first power of 10^j which is smaller than the number of timesteps.
+	     */
 	    if(N > dp.numTimesteps){
 		printf("Not possible to choose a chunksize as a power of 2!\n");
 		printf("Falling back to calculting L manually ...\n");
@@ -468,14 +497,6 @@ void copyChunkFromFileToArray(int atom, int block, const char* filename, double 
 	fseek(fp, readStart * sizeof(double), SEEK_SET);
 
 	fread(targetArray + shift, sizeof(double), elementsToRead, fp);
-
-	/*
-	for(int i=0; i<dp.chunkSize; i++){
-	    printf("%lf ", targetArray[i]);
-	}
-	printf("\n");
-	printf("\n");
-	*/
     }
 
     fclose(fp);
@@ -497,63 +518,70 @@ void createMorletWavelet(int M){
 
     memset(ac.waveletArray, 0, dp.chunkSize * sizeof(double complex));
 
-    FILE* fp = fopen("wavelet_test.dat", "w");
-    int half = wp.M / 2 + 1;
+    /* 
+     * TODO: Why do those two block yield different results???
+     */
 
-for(int n = -half; n <= half; n++) {
+    /*
+     * Comment this line out if you want to execute the other block
+     */
+    #define BLOCK1
 
-    double tau = n * dp.dt_data / wp.scale;
+    #ifdef BLOCK1
+	FILE* fp = fopen("wavelet_test.dat", "w");
+	int half = wp.M / 2 + 1;
+	for(int n = -half; n <= half; n++) {
 
-    double complex psi =
-        1.0 / (pow(M_PI, 0.25) * sqrt(wp.scale * wp.d))
-        * exp(-tau*tau/(2.0*wp.d*wp.d))
-        * cexp(I * wp.omega_0 * tau);
+	    double tau = n * dp.dt_data / wp.scale;
 
-    int idx;
-    if(n >= 0)
-        idx = n;
-    else
-        idx = dp.chunkSize + n;   // negative times at the end of the array
+	    double complex psi =
+		1.0 / (pow(M_PI, 0.25) * sqrt(wp.scale * wp.d))
+		* exp(-tau*tau/(2.0*wp.d*wp.d))
+		* cexp(I * wp.omega_0 * tau);
 
-    ac.waveletArray[idx] = psi;
-}
-/*
-    int i;
-    double tau;
-    double a = M/2.0;
+	    int idx;
+	    if(n >= 0)
+		idx = n;
+	    else
+		idx = dp.chunkSize + n;   // negative times at the end of the array
 
-    FILE* fp = fopen("wavelet_test.dat", "w");
+	    ac.waveletArray[idx] = psi;
+	}
+    #else
+	int i;
+	double tau;
+	double a = M/2.0;
 
-    for(i=0; i<M; i++){
-	 // wraps the data around 0. (M+1)/2 on the left and (M-1)/2 on the right.
-	 // this is done to eliminate artifacts in the fft plot later on.
-    
-	int shifted = (i + M/2 + 1) % M;
-	//int shifted = i;
-	//printf("i: %d --> shifted index: %d\n", i, shifted);
-	a = 0;
+	FILE* fp = fopen("wavelet_test.dat", "w");
 
-	tau = (shifted - a) * dp.dt_data / wp.scale;
+	for(i=0; i<M; i++){
+	    // wraps the data around 0. (M+1)/2 on the left and (M-1)/2 on the right.
+	    // this is done to eliminate artifacts in the fft plot later on.
 
-	ac.waveletArray[shifted] = 1.0 / (pow(M_PI, 1.0/4.0) 
-				    * sqrt(wp.scale * wp.d)) 
-	     			    * exp(-pow(tau, 2) / (2.0*pow(wp.d, 2.0))) 
-				    * cexp(I * wp.omega_0 * tau);
-	
-	fprintf(fp, "%f\n", creal(ac.waveletArray[shifted]));
-    }
-    */
+	    int shifted = (i + M/2 + 1) % M;
+	    //int shifted = i;
+	    //printf("i: %d --> shifted index: %d\n", i, shifted);
+	    a = 0;
+
+	    tau = (shifted - a) * dp.dt_data / wp.scale;
+
+	    ac.waveletArray[shifted] = 1.0 / (pow(M_PI, 1.0/4.0) 
+		    * sqrt(wp.scale * wp.d)) 
+		* exp(-pow(tau, 2) / (2.0*pow(wp.d, 2.0))) 
+		* cexp(I * wp.omega_0 * tau);
+
+	    fprintf(fp, "%f\n", creal(ac.waveletArray[shifted]));
+	}
+    #endif
+
     fclose(fp);
 }
 
 
-/*
- * ===========================================================================================================
- * 					FREQUENCY-DOMAIN
- * ===========================================================================================================
- */
 void prepareFFT(FFT_wrapper* data, FFT_wrapper* wavelet, FFT_wrapper* result, int chunkSize){
-    // Prepare Fourier-transformation
+    /*
+     * Prepare Fourier-transformation
+     */
     data->in = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * chunkSize);
     data->out = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * chunkSize);
     data->plan = fftw_plan_dft_1d(chunkSize, data->in, data->out, FFTW_FORWARD, FFTW_MEASURE);
@@ -572,7 +600,9 @@ void FFT(FFT_wrapper* wrapper){
 }
 
 void prepareData(int chunkSize){
-    // Copy data into real-part of data_in array and set complex part equal to 0.0
+    /*
+     * Copy data into real-part of data_in array and set complex part equal to 0.0
+     */
     int i;
     memset(data.in, 0, chunkSize * sizeof(double complex)); // TODO: needed?
     for(i=0; i<chunkSize; i++){
@@ -609,17 +639,21 @@ void WaveletAnalysisFD(int currentBlock, float currentFrequency, FILE* fp){
     int i;
     double A, B, C, D;
     for(i=0; i<chunkSize; i++){
-	A = data.out[i][0];
-	B = data.out[i][1];
-	C = wavelet.out[i][0];
-	D = -wavelet.out[i][1];
-	//printf("%.4e %.4e %.4e %.4e\n", A, B, C, D);
+	A = data.out[i][0];		// Re{f}
+	B = data.out[i][1];		// Im{f}
+	C = wavelet.out[i][0];		// Re{Psi}
+	D = wavelet.out[i][1];		// Im{Psi}
 
-	result.in[i][0] = A*C - B*D;
-	result.in[i][1] = A*D + B*C;
+	/*
+	 * Convolution = Psi_conj * f
+	 */
+	result.in[i][0] = A*C + B*D;
+	result.in[i][1] = B*C - A*D;
     }
     // inverse Fourier-transformation of the results
     FFT(&result);
+
+
 
     /*
      * Write results to file
@@ -628,14 +662,12 @@ void WaveletAnalysisFD(int currentBlock, float currentFrequency, FILE* fp){
     int offset = 0;
     //for(i=chunkSize-dp.L; i<chunkSize; i++){
     for(i=wp.M-1; i<wp.M-1+dp.L; i++){
-    //for(i=chunkSize-dp.L-chunkSize/2.0; i<chunkSize-chunkSize/2.0; i++){
 	time = (currentBlock * dp.L + offset) * dp.dt_data; 
 
 	/*
 	 * TODO: should not be neccessary
 	 * discard values which are greater than the chunkSize (last block is padded with zeros) so gnuplot gets an even grid to plot
 	 */
-	//if(time > chunkSize-1){
 	if(currentBlock *dp.L + offset >= dp.numTimesteps){
 	    break;
 	}
@@ -665,6 +697,10 @@ void freeData(){
 
 
 void createArtificialDataset(double dt_data){
+    /*
+     * This function creates an artificial dataset.
+     * Here a linear chirp is used for the first 200ps and a constant frequency for the last 200ps
+     */
     double t;
     FILE *fp = fopen("hellothere.xyz", "w");
     for(t=0.0; t<400.0; t+=dt_data){
@@ -687,28 +723,5 @@ void createArtificialDataset(double dt_data){
     }
     fclose(fp);
 }
-
-/*
-   int getNumberOfElements(const char* filename){
-   FILE *fp = fopen(filename, "r");	
-   if(fp==NULL){
-   printf("Could not open file!\n");
-   }
-
-   int lines = 0;
-   char buffer[256];
-
-   while(fgets(buffer, sizeof(buffer), fp) != NULL){
-   lines++;
-   }
-
-   fclose(fp);
-
-   dp.numElements = lines;
-   printf("reading number of elements as: %d\n", lines);
-
-   return lines;
-   }
-   */
 
 

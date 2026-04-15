@@ -3,6 +3,7 @@ data_results/*
 #ignore all files but allow file with suffix
 *
 !*.*
+!Makefile
 
 *.xyz
 *.dat
